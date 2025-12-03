@@ -63,12 +63,8 @@ router.get('/:game_id', authMiddleware, GameController.getGameState);
  *           schema:
  *             type: object
  *             required:
- *               - game_id
  *               - horse_id
  *             properties:
- *               game_id:
- *                 type: integer
- *                 example: 12
  *               horse_id:
  *                 type: integer
  *                 example: 79
@@ -82,12 +78,11 @@ router.get('/:game_id', authMiddleware, GameController.getGameState);
  *       403:
  *         description: Не ваш ход или не ваша фишка
  *       404:
- *         description: Фишка или игра не найдены
+ *         description: Фишка не найдена
  *       500:
  *         description: Ошибка сервера
  */
 router.post('/move', authMiddleware, GameController.moveHorse);
-
 /**
  * @swagger
  * /api/game/{game_id}/leave:

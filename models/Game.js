@@ -12,12 +12,12 @@ class Game {
     return rows[0] ?? null;
   }
 
-  static async getHorse(horse_id, game_id) {
+  static async getHorse(horse_id) {
     const { rows } = await pool.query(`
-      SELECT h.*, p.login, p.color FROM horses h
+      SELECT h.*, p.login, p.color, p.game_id FROM horses h
       JOIN player p ON h.player_id = p.player_id
-      WHERE h.horse_id = $1 AND p.game_id = $2
-    `, [horse_id, game_id]);
+      WHERE h.horse_id = $1
+    `, [horse_id]);
     return rows[0] ?? null;
   }
 
@@ -46,148 +46,157 @@ class Game {
   }
 
 // --------------------------------------------
-  static async getGameState(game_id) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      const game = await this.getGameById(game_id);
-      if (!game) {
-        await client.query('ROLLBACK');
-        return { success: false, code: 404, message: 'Game not found' };
-      }
-
-      const players = await this.getAllPlayers(game_id);
-
-      let currentPlayer = null;
-      let current_dice_number = null;
-      let remaining_time = game.step_time;
-
-      if (game.current_turn_player_login) {
-        currentPlayer = players.find(p => p.login === game.current_turn_player_login);
-
-        if (currentPlayer) {
-          let pending = await this.getPendingDice(currentPlayer.player_id);
-
-          if (!pending) {
-            // chưa roll dice -> auto-roll
-            const roll = Math.floor(Math.random() * 6) + 1;
-            await client.query(`
-              INSERT INTO dice (player_id, number, roll_used, endtime)
-              VALUES ($1, $2, false, NOW() + interval '${game.step_time} seconds')
-            `, [currentPlayer.player_id, roll]);
-            current_dice_number = roll;
-            remaining_time = game.step_time;
-          } else {
-            const timeLeft = Math.floor((new Date(pending.endtime) - Date.now()) / 1000);
-
-            if (timeLeft <= 0) {
-              // thời gian hết -> chuyển lượt sang người kế tiếp
-              const playerLogins = players.map(p => p.login);
-              const idx = playerLogins.indexOf(currentPlayer.login);
-              const nextLogin = playerLogins[(idx + 1) % playerLogins.length];
-              const nextPlayer = players.find(p => p.login === nextLogin);
-
-              // cập nhật current_turn trong DB
-              await client.query('UPDATE games SET current_turn_player_login = $1 WHERE game_id = $2', [nextLogin, game_id]);
-
-              // xóa dice cũ của người mới
-              await client.query('DELETE FROM dice WHERE player_id = $1', [nextPlayer.player_id]);
-
-              // auto-roll cho người chơi mới
-              const roll = Math.floor(Math.random() * 6) + 1;
-              await client.query(`
-                INSERT INTO dice (player_id, number, roll_used, endtime)
-                VALUES ($1, $2, false, NOW() + interval '${game.step_time} seconds')
-              `, [nextPlayer.player_id, roll]);
-
-              currentPlayer = nextPlayer;
-              current_dice_number = roll;
-              remaining_time = game.step_time;
-            } else {
-              current_dice_number = pending.number;
-              remaining_time = timeLeft;
-            }
-          }
-        }
-      }
-
-      // lấy horses
-      const horsesRows = await this.getAllHorses(game_id);
-      const horsesByPlayer = {};
-      players.forEach(p => horsesByPlayer[p.player_id] = []);
-      horsesRows.forEach(h => {
-        horsesByPlayer[h.player_id].push({ horse_id: h.horse_id, cell_number: h.cell_id ?? -1 });
-      });
-
-      // kiểm tra winner
-      let winner = null;
-      const playerCount = parseInt((await client.query('SELECT COUNT(*) AS count FROM player WHERE game_id = $1', [game_id])).rows[0].count);
-      if (playerCount === 1) {
-        const winnerResult = await client.query('SELECT color FROM player WHERE game_id = $1', [game_id]);
-        winner = winnerResult.rows[0]?.color || null;
-      } else if (playerCount > 1) {
-        const FINISH_CELLS = { red: 75, green: 57, yellow: 63, blue: 69 };
-        const horsesQuery = await client.query(`
-          SELECT h.cell_id, p.color
-          FROM horses h
-          JOIN player p ON h.player_id = p.player_id
-          WHERE p.game_id = $1
-        `, [game_id]);
-
-        const winners = {};
-        horsesQuery.rows.forEach(h => {
-          if (!winners[h.color]) winners[h.color] = 0;
-          if (h.cell_id === FINISH_CELLS[h.color]) winners[h.color]++;
-        });
-
-        winner = Object.entries(winners).find(([color, count]) => count === 4)?.[0] || null;
-      }
-
-      await client.query('COMMIT');
-
-      return {
-        success: true,
-        code: 200,
-        data: {
-          game_id: game.game_id,
-          status: game.status,
-          current_turn: currentPlayer?.login || null,
-          remaining_time,
-          step_time: game.step_time,
-          dice: current_dice_number,
-          winner,
-          players: players.map(p => ({
-            player_id: p.player_id,
-            login: p.login,
-            color: p.color,
-            is_turn: currentPlayer?.login === p.login,
-            horses: horsesByPlayer[p.player_id]
-          }))
-        }
-      };
-
-    } catch (err) {
-      await client.query('ROLLBACK');
-      console.error(err);
-      return { success: false, code: 500, message: 'Failed to get game state' };
-    } finally {
-      client.release();
-    }
-  }
-
-static async moveHorse(game_id, horse_id, login) {
+static async getGameState(game_id) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const game = await this.getGameById(game_id);
+    if (!game) {
+      await client.query('ROLLBACK');
+      return { success: false, code: 404, message: 'Game not found' };
+    }
+
+    const players = await this.getAllPlayers(game_id);
+
+    let currentPlayer = null;
+    let current_dice_number = null;
+    let remaining_time = game.step_time;
+
+    if (game.current_turn_player_login) {
+      currentPlayer = players.find(p => p.login === game.current_turn_player_login);
+
+      if (currentPlayer) {
+        let pending = await this.getPendingDice(currentPlayer.player_id);
+
+        if (!pending) {
+          // ✅ Chưa roll dice -> auto-roll
+          const roll = Math.floor(Math.random() * 6) + 1;
+          
+          // ✅ SỬA: Không insert số 0, chỉ insert số thực (1-6)
+          const endtime = new Date(Date.now() + game.step_time * 1000);
+          await client.query(`
+            INSERT INTO dice (player_id, number, roll_used, endtime)
+            VALUES ($1, $2, false, $3)
+          `, [currentPlayer.player_id, roll, endtime]);
+          
+          current_dice_number = roll;
+          remaining_time = game.step_time;
+        } else {
+          const timeLeft = Math.floor((new Date(pending.endtime) - Date.now()) / 1000);
+
+          if (timeLeft <= 0) {
+            // ✅ Thời gian hết -> chuyển lượt sang người kế tiếp
+            const playerLogins = players.map(p => p.login);
+            const idx = playerLogins.indexOf(currentPlayer.login);
+            const nextLogin = playerLogins[(idx + 1) % playerLogins.length];
+            const nextPlayer = players.find(p => p.login === nextLogin);
+
+            // Cập nhật current_turn trong DB
+            await client.query('UPDATE games SET current_turn_player_login = $1 WHERE game_id = $2', [nextLogin, game_id]);
+
+            // Xóa dice cũ của người mới
+            await client.query('DELETE FROM dice WHERE player_id = $1', [nextPlayer.player_id]);
+
+            // ✅ Auto-roll cho người chơi mới (không insert 0)
+            const roll = Math.floor(Math.random() * 6) + 1;
+            const endtime = new Date(Date.now() + game.step_time * 1000);
+            await client.query(`
+              INSERT INTO dice (player_id, number, roll_used, endtime)
+              VALUES ($1, $2, false, $3)
+            `, [nextPlayer.player_id, roll, endtime]);
+
+            currentPlayer = nextPlayer;
+            current_dice_number = roll;
+            remaining_time = game.step_time;
+          } else {
+            // ✅ Còn thời gian, trả về dice hiện tại (KHÔNG PHẢI 0)
+            current_dice_number = pending.number;
+            remaining_time = timeLeft;
+          }
+        }
+      }
+    }
+
+    // Lấy horses
+    const horsesRows = await this.getAllHorses(game_id);
+    const horsesByPlayer = {};
+    players.forEach(p => horsesByPlayer[p.player_id] = []);
+    horsesRows.forEach(h => {
+      horsesByPlayer[h.player_id].push({ horse_id: h.horse_id, cell_number: h.cell_id ?? -1 });
+    });
+
+    // Kiểm tra winner
+    let winner = null;
+    const playerCount = parseInt((await client.query('SELECT COUNT(*) AS count FROM player WHERE game_id = $1', [game_id])).rows[0].count);
+    
+    if (playerCount === 1) {
+      const winnerResult = await client.query('SELECT color FROM player WHERE game_id = $1', [game_id]);
+      winner = winnerResult.rows[0]?.color || null;
+    } else if (playerCount > 1) {
+      const FINISH_CELLS = { red: 75, green: 57, yellow: 63, blue: 69 };
+      const horsesQuery = await client.query(`
+        SELECT h.cell_id, p.color
+        FROM horses h
+        JOIN player p ON h.player_id = p.player_id
+        WHERE p.game_id = $1
+      `, [game_id]);
+
+      const winners = {};
+      horsesQuery.rows.forEach(h => {
+        if (!winners[h.color]) winners[h.color] = 0;
+        if (h.cell_id === FINISH_CELLS[h.color]) winners[h.color]++;
+      });
+
+      winner = Object.entries(winners).find(([color, count]) => count === 4)?.[0] || null;
+    }
+
+    await client.query('COMMIT');
+
+    return {
+      success: true,
+      code: 200,
+      data: {
+        game_id: game.game_id,
+        status: game.status,
+        current_turn: currentPlayer?.login || null,
+        remaining_time,
+        step_time: game.step_time,
+        dice: current_dice_number, // ✅ KHÔNG BAO GIỜ LÀ 0
+        winner,
+        players: players.map(p => ({
+          player_id: p.player_id,
+          login: p.login,
+          color: p.color,
+          is_turn: currentPlayer?.login === p.login,
+          horses: horsesByPlayer[p.player_id]
+        }))
+      }
+    };
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    return { success: false, code: 500, message: 'Failed to get game state' };
+  } finally {
+    client.release();
+  }
+}
+
+static async moveHorse(horse_id, login) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lấy horse (chứa game_id)
+    const horse = await this.getHorse(horse_id);
+    if (!horse) throw { code: 404, message: 'Horse not found' };
+
+    const game_id = horse.game_id;
+    const game = await this.getGameById(game_id);
     if (!game) throw { code: 404, message: 'Game not found' };
     if (login !== game.current_turn_player_login)
       throw { code: 403, message: 'Not your turn' };
-
-    const horse = await this.getHorse(horse_id, game_id);
-    if (!horse) throw { code: 404, message: 'Horse not found' };
 
     const dice = await this.getPendingDice(horse.player_id);
     if (!dice) throw { code: 400, message: 'Roll dice first' };
@@ -238,24 +247,19 @@ static async moveHorse(game_id, horse_id, login) {
     let canRollAgain = false;
 
     if (diceRoll === 6) {
-      // Người chơi được roll tiếp → tạo dice mới, reset remaining_time
       canRollAgain = true;
+      await client.query(`DELETE FROM dice WHERE player_id = $1`, [horse.player_id]);
 
-      // Xóa dice cũ và tạo dice mới placeholder
-      await client.query(`DELETE FROM dice WHERE player_id = $1`, [
-        horse.player_id,
-      ]);
-
+      const roll = Math.floor(Math.random() * 6) + 1;
+      const endtime = new Date(Date.now() + game.step_time * 1000);
       await client.query(
         `INSERT INTO dice (player_id, number, roll_used, endtime)
-         VALUES ($1, 0, false, NOW() + interval '${game.step_time} seconds')`,
-        [horse.player_id]
+         VALUES ($1, $2, false, $3)`,
+        [horse.player_id, roll, endtime]
       );
 
-      // nextTurnLogin vẫn là chính người chơi này
       nextTurnLogin = login;
     } else {
-      // Dice != 6 → chuyển sang người tiếp theo
       const players = (await this.getAllPlayers(game_id)).map((p) => p.login);
       const idx = players.indexOf(game.current_turn_player_login);
       nextTurnLogin = players[(idx + 1) % players.length];
@@ -271,13 +275,14 @@ static async moveHorse(game_id, horse_id, login) {
       );
 
       if (next.rows[0]) {
-        await client.query(`DELETE FROM dice WHERE player_id = $1`, [
-          next.rows[0].player_id,
-        ]);
+        await client.query(`DELETE FROM dice WHERE player_id = $1`, [next.rows[0].player_id]);
+        
+        const roll = Math.floor(Math.random() * 6) + 1;
+        const endtime = new Date(Date.now() + game.step_time * 1000);
         await client.query(
           `INSERT INTO dice (player_id, number, roll_used, endtime)
-           VALUES ($1, 0, false, NOW() + interval '${game.step_time} seconds')`,
-          [next.rows[0].player_id]
+           VALUES ($1, $2, false, $3)`,
+          [next.rows[0].player_id, roll, endtime]
         );
       }
     }

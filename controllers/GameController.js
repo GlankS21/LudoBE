@@ -24,28 +24,32 @@ class GameController {
   }
   
   async moveHorse(req, res) {
-    const { game_id, horse_id } = req.body;
-    const { login } = req.player;
-    try {
-      const result = await Game.moveHorse(game_id, horse_id, login);
-      if (!result.success) {
-        return res.status(result.code).json({
-          success: false,
-          message: result.message,
-          error: result.error
-        });
-      }
-      return res.status(200).json({
-        success: true,
-        message: 'Лошадь успешно перемещена',
-        data: result.data
+  const { horse_id } = req.body; // ✅ Chỉ cần horse_id
+  const { login } = req.player;
+  try {
+    const result = await Game.moveHorse(horse_id, login); // ✅ Bỏ game_id
+    if (!result.success) {
+      return res.status(result.code).json({
+        success: false,
+        message: result.message,
       });
-
-    } catch (err) {
-      console.error(err);
-      return res.status(500).json({ success: false, message: 'Не удалось переместить лошадь', error: err.message });
     }
+    return res.status(200).json({
+      success: true,
+      message: 'Лошадь успешно перемещена',
+      data: result.data
+    });
+  } 
+  catch (err) {
+    console.error(err);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Не удалось переместить лошадь', 
+      error: err.message 
+    });
   }
+}
+
 
   async leaveGame(req, res) {
     const { game_id } = req.params;
