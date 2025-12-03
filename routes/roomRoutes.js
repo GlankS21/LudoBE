@@ -70,11 +70,8 @@ router.get('/list', (req, res) => { roomController.listRooms(req, res);});
  *           schema:
  *             type: object
  *             required:
- *               - token
  *               - game_id
  *             properties:
- *               token:
- *                 type: string
  *               game_id:
  *                 type: integer
  *                 example: 1
