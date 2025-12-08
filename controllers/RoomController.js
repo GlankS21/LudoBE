@@ -83,6 +83,14 @@ class RoomController {
       }
 
       const gameData = game.rows[0];
+      if (gameData.status === 'started') {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          success: false,
+          message: 'Игра уже началась, невозможно присоединиться',
+        });
+      }
+
       const hasPlayer = await client.query( 'SELECT player_id FROM player WHERE game_id = $1 AND login = $2', [game_id, login] );
       if (hasPlayer.rows.length > 0) {
         await client.query('ROLLBACK');
@@ -301,6 +309,7 @@ class RoomController {
       game_id: game.game_id,
       player_amount: game.player_amount,
       step_time: game.step_time,
+      status: game.status,
       current_players: playerCount,
       players,
     };
