@@ -14,28 +14,20 @@ const Room = require('./models/Room');
 const app = express();
 const server = http.createServer(app);
 
-// ============================================
-// CORS Configuration - Allow Multiple Origins
-// ============================================
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:8000',
   'http://127.0.0.1:3000',
   process.env.CLIENT_URL
-].filter(Boolean); // Remove undefined/null values
+].filter(Boolean); 
 
 console.log('[CORS] Allowed origins:', allowedOrigins);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl requests)
-    if (!origin) {
-      return callback(null, true);
-    }
-    
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
+    if (!origin) return callback(null, true);    
+    if (allowedOrigins.includes(origin)) callback(null, true);
+    else {
       console.warn(`[CORS] Rejected origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
@@ -48,13 +40,9 @@ const corsOptions = {
 const ioOptions = {
   cors: {
     origin: (origin, callback) => {
-      if (!origin) {
-        return callback(null, true);
-      }
-      
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
+      if (!origin) return callback(null, true);  
+      if (allowedOrigins.includes(origin)) callback(null, true);
+      else {
         console.warn(`[Socket.IO] Rejected origin: ${origin}`);
         callback(new Error('Not allowed by CORS'));
       }
@@ -64,32 +52,19 @@ const ioOptions = {
   }
 };
 
-// ============================================
-// Socket.IO Initialization
-// ============================================
 const io = socketIO(server, ioOptions);
 
-io.on('connect_error', (error) => {
-  console.error(`[SOCKET.IO_ERROR] Connection Error:`, error.message);
-});
+io.on('connect_error', (error) => { console.error(`[SOCKET.IO_ERROR] Connection Error:`, error.message); });
 
-// ============================================
-// Express Middleware
-// ============================================
 app.use(cors(corsOptions));
 app.use(express.json());
-
-// Swagger UI
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
-
-// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/room', roomRoutes);
 app.use('/api/game', gameRoutes);
 
-// ============================================
-// Socket.IO Connection Handler
-// ============================================
+const pendingGameDeletions = new Set();
+
 io.on('connection', (socket) => {
   const gameId = socket.handshake.query.gameId;
   const roomId = socket.handshake.query.roomId;
@@ -104,22 +79,59 @@ io.on('connection', (socket) => {
     socket.disconnect(true);
     return;
   }
+  if (roomId && !gameId) {
+    const roomName = `room-${roomId}`;
+    socket.join(roomName);
+    console.log(`[SOCKET_CONNECTION] ${login} connected to room ${roomId}`);
+    
+    socket.on('disconnect', async () => {
+      console.log(`[SOCKET_DISCONNECT] ${login} disconnected from room ${roomId}`);
+      
+      try {
+        const roomStatus = await Room.getRoomStatus(roomId);
+        if (roomStatus && roomStatus.status !== 'started') {
+          await Room.removePlayer(roomId, login);
+          console.log(`[ROOM_AUTO_LEAVE] ${login} left room ${roomId}`);
+          
+          io.to(roomName).emit('playerLeft', {
+            login: login,
+            message: `${login} покинул комнату`
+          });
+        } 
+        else console.log(`[ROOM_SKIP_LEAVE] Game ${roomId} already started, skipping auto-leave for ${login}`);
+      } 
+      catch (err) {
+        console.error(`[ROOM_AUTO_LEAVE] Error:`, err);
+      }
+    });
+
+    socket.on('playerLeavingRoom', async (data) => {
+      try {
+        await Room.removePlayer(roomId, login);
+        io.to(roomName).emit('playerLeft', {
+          login: login,
+          message: `${login} покинул комнату`
+        });
+
+        socket.leave(roomName);
+        socket.disconnect();
+      } 
+      catch (err) {
+        console.error(`[SOCKET_PLAYER_LEAVING_ROOM] Error:`, err);
+      }
+    });
+  }
 
   if (gameId) {
     const roomName = `game-${gameId}`;
     socket.join(roomName);
     console.log(`[SOCKET_CONNECTION] ${login} connected to game ${gameId}`);
-
-    // Socket error handler
-    socket.on('error', (error) => {
-      console.error(`[SOCKET_ERROR] ${login} - Game ${gameId}:`, error);
-    });
-
-    // Handle Player Leaving Game
+    
+    socket.on('error', (error) => { console.error(`[SOCKET_ERROR] ${login} - Game ${gameId}:`, error);});
     socket.on('playerLeaving', async (data) => {
       try {
         await Game.leaveGame(gameId, login);
-        
+
         io.to(roomName).emit('playerLeft', {
           login: login,
           message: `${login} left the game`
@@ -128,6 +140,7 @@ io.on('connection', (socket) => {
         const gameState = await Game.getGameState(gameId);
         if (gameState.success) {
           io.to(roomName).emit('gameStateUpdate', gameState.data);
+          if (gameState.data.winner) handleGameWinner(gameId, gameState.data);
         }
 
         socket.leave(roomName);
@@ -136,52 +149,10 @@ io.on('connection', (socket) => {
         console.error(`[SOCKET_PLAYER_LEAVING] Error:`, err);
       }
     });
-
-    // Handle Tab Close
-    socket.on('tabClosing', async (data) => {
-      try {
-        await Game.leaveGame(gameId, login);
-        
-        io.to(roomName).emit('playerLeft', {
-          login: login,
-          message: `${login} left the game`
-        });
-
-        const gameState = await Game.getGameState(gameId);
-        if (gameState.success) {
-          io.to(roomName).emit('gameStateUpdate', gameState.data);
-        }
-
-        socket.leave(roomName);
-      } catch (err) {
-        console.error(`[SOCKET_TAB_CLOSING] Error:`, err);
-      }
-    });
-
-    // Handle Game Disconnect
-    socket.on('disconnect', async () => {
-      try {
-        await Game.leaveGame(gameId, login);
-        
-        io.to(roomName).emit('playerLeft', {
-          login: login,
-          message: `${login} disconnected`
-        });
-
-        const gameState = await Game.getGameState(gameId);
-        if (gameState.success) {
-          io.to(roomName).emit('gameStateUpdate', gameState.data);
-        }
-      } catch (err) {
-        console.error(`[SOCKET_DISCONNECT] Error:`, err);
-      }
-    });
+    socket.on('disconnect', async () => { console.log(`[SOCKET_DISCONNECT] ${login} socket disconnected from game ${gameId} - NOT removing from game (can rejoin)`);});
   }
 });
 
-// ============================================
-// API endpoint để xử lý tab close qua HTTP
-// ============================================
 app.post('/api/game/:game_id/leave', async (req, res) => {
   try {
     const { game_id } = req.params;
@@ -193,8 +164,6 @@ app.post('/api/game/:game_id/leave', async (req, res) => {
 
     console.log(`[LEAVE_GAME_API] ${login} left game ${game_id}`);
     await Game.leaveGame(game_id, login);
-    
-    // Broadcast cập nhật game state
     await broadcastGameState(game_id);
     
     res.json({ 
@@ -210,14 +179,51 @@ app.post('/api/game/:game_id/leave', async (req, res) => {
   }
 });
 
-// ============================================
-// Broadcast game state helper
-// ============================================
+const handleGameWinner = async (gameId, gameState) => {
+  if (pendingGameDeletions.has(gameId)) return;
+  pendingGameDeletions.add(gameId);
+
+  const roomName = `game-${gameId}`;
+  const winner = gameState.winner;
+  const winnerPlayer = gameState.players?.find(p => p.color === winner);
+
+  console.log(`[GAME_WINNER] Game ${gameId} - Winner: ${winner} (${winnerPlayer?.login || 'unknown'})`);
+  io.to(roomName).emit('game_ended', {
+    winner: winner,
+    winnerLogin: winnerPlayer?.login || null,
+    message: `Game ended! Winner: ${winnerPlayer?.login || winner}`,
+    redirectIn: 5
+  });
+
+  setTimeout(async () => {
+    try {
+      console.log(`[GAME_CLEANUP] Cleaning up game ${gameId}...`);
+      await Game.deleteGame(gameId);
+      io.to(roomName).emit('game_deleted', {
+        gameId: gameId,
+        message: 'Game has been deleted'
+      });
+      const sockets = await io.in(roomName).fetchSockets();
+      for (const socket of sockets) {
+        socket.leave(roomName);
+        socket.disconnect(true);
+      }
+
+      console.log(`[GAME_CLEANUP] Game ${gameId} cleaned up, ${sockets.length} players disconnected`);
+    } catch (err) {
+      console.error(`[GAME_CLEANUP] Error cleaning up game ${gameId}:`, err);
+    } finally {
+      pendingGameDeletions.delete(gameId);
+    }
+  }, 5000);
+};
+
 const broadcastGameState = async (gameId) => {
   try {
     const gameState = await Game.getGameState(gameId);
     if (gameState.success) {
       io.to(`game-${gameId}`).emit('gameStateUpdate', gameState.data);
+      if (gameState.data.winner) handleGameWinner(gameId, gameState.data);
     }
   } catch (err) {
     console.error('Broadcast game state error:', err);
@@ -225,15 +231,9 @@ const broadcastGameState = async (gameId) => {
 };
 
 app.locals.broadcastGameState = broadcastGameState;
+app.locals.handleGameWinner = handleGameWinner;
 
-// ============================================
-// Database initialization
-// ============================================
 initDatabase();
-
-// ============================================
-// Server startup
-// ============================================
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, () => {
   console.log(`Server running at port ${PORT}`);
@@ -246,9 +246,6 @@ server.listen(PORT, () => {
   process.exit(1);
 });
 
-// ============================================
-// Graceful shutdown
-// ============================================
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
   server.close(() => {
@@ -257,4 +254,4 @@ process.on('SIGTERM', () => {
   });
 });
 
-module.exports = { app, io, broadcastGameState };
+module.exports = { app, io, broadcastGameState, handleGameWinner };
